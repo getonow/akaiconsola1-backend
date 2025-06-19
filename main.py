@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import gspread
 from google.oauth2.service_account import Credentials
@@ -6,6 +7,15 @@ import os
 import json
 
 app = FastAPI()
+
+# --- CORS Middleware ---
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # For production, you can use ["https://getonow.github.io"]
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Google Sheets setup
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets.readonly']

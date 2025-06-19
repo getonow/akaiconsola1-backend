@@ -3,3 +3,5 @@ uvicorn
 gspread
 google-auth
 pydantic
+python-multipart
+starlette
