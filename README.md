@@ -1,120 +1,95 @@
-# AI-Powered Procurement Analysis API (v2.0)
+# AI-Powered Procurement Analysis API (v2.1)
 
-This FastAPI backend provides a sophisticated, AI-driven procurement analysis service. It analyzes single-sourced part data from a Google Sheet to identify cost-saving opportunities through **price trend analysis**, **cross-material benchmarking**, and **real-time web scraping** for alternative suppliers.
+This FastAPI backend provides a sophisticated, AI-driven procurement analysis service. It analyzes single-sourced part data from a Google Sheet to identify cost-saving opportunities through **price trend analysis**, **market index comparison**, and **real-time web scraping** for alternative suppliers.
 
 This is a "rules-based expert system" that does not use an LLM, ensuring your data remains 100% private and the analysis is fast and free.
 
 ## 🚀 Core Features
 
 -   **Price Spike & Trend Analysis**: Automatically detects parts with recent, significant price increases (>10% MoM) by analyzing historical price data.
--   **In-House Benchmarking**: For parts with price spikes, it intelligently finds *other parts* with similar materials from *different suppliers* in your sheet to provide a powerful internal benchmark for renegotiation.
--   **Web-Based Supplier Discovery**: Performs real-time Google searches to find new potential suppliers in Europe for high-cost or price-spike parts, then extracts their name and website.
--   **Dynamic & Private**: Analysis is performed based on the data you provide, and your sensitive procurement data never leaves your system.
--   **Structured, Actionable Output**: Provides a clear summary and a detailed list of opportunities with specific next steps.
+-   **Market Index Benchmarking**: Flags parts where your price is significantly higher than the market average (`Priceevoindex`), providing a powerful, data-driven argument for renegotiation.
+-   **In-House Benchmarking**: For parts with price spikes, it intelligently finds *other parts* with similar materials from *different suppliers* in your sheet to provide an internal benchmark for renegotiation.
+-   **Web-Based Supplier Discovery**: Performs real-time Google searches to find new potential suppliers in Europe for high-cost or price-spike parts.
 
 ## 🛠️ Setup
 
-1.  **Clone the repository:**
-    ```bash
-    git clone https://github.com/getonow/akaiconsola1-backend.git
-    cd akaiconsola1-backend
-    ```
+1.  **Clone the repository** and navigate into the directory.
+2.  **Install dependencies**: `pip install -r requirements.txt`
+3.  **Set `GOOGLE_SERVICE_ACCOUNT_JSON` Environment Variable**:
+    -   **PowerShell**: `$env:GOOGLE_SERVICE_ACCOUNT_JSON = Get-Content -Raw -Path .\service-account.json`
+    -   **Linux/macOS**: `export GOOGLE_SERVICE_ACCOUNT_JSON=$(cat service-account.json)`
+4.  **Share Google Sheet**: Ensure your service account email has "Viewer" access to the Google Sheet.
 
-2.  **Install dependencies:**
-    ```bash
-    pip install -r requirements.txt
-    ```
+## 📊 Google Sheet Structure
 
-3.  **Set `GOOGLE_SERVICE_ACCOUNT_JSON` Environment Variable:**
-    This application now loads Google credentials securely from an environment variable.
+The agent is designed to work with the following exact column names.
 
-    -   **In PowerShell (for local development):**
-        Before running the server, execute this command in your terminal. Make sure `service-account.json` is in your project directory.
-        ```powershell
-        $env:GOOGLE_SERVICE_ACCOUNT_JSON = Get-Content -Raw -Path .\service-account.json
-        ```
-    -   **In Linux/macOS:**
-        ```bash
-        export GOOGLE_SERVICE_ACCOUNT_JSON=$(cat service-account.json)
-        ```
-    -   **For Production:** Set this as a secret environment variable in your deployment environment.
+#### Supplier & Part Details
+-   `suppliernumber`: Unique ID for the supplier.
+-   `suppliername`: Name of the supplier.
+-   `suppliercontactname`: Main contact person.
+-   `suppliercontactemail`: Contact's email.
+-   `suppliermanufacturinglocation`: City and country of manufacture.
+-   `partreferencenumber`: **(Required)** Unique ID for the part.
+-   `part name`: **(Required)** Description of the part, used for web searches.
+-   `material`: **(Required)** The material type (e.g., `EPDM`), used for cross-material comparisons.
+-   `currency`: The currency for pricing (e.g., `EUR`).
 
-4.  **Share Google Sheet:** Ensure your service account email has "Viewer" access to the Google Sheet.
+#### Monthly Volume Data
+-   `voljanuary2023`, `volfebruary2023`, ..., `voldecember2025`
+-   Represents the purchase/production volume for each month. (Currently informational, not used in core analysis).
 
-## 📊 Expected Google Sheet Structure
+#### Monthly Price Data
+-   `pricejanuary2023`, `pricefebruary2023`, ...
+-   **Crucial for trend analysis.** The agent requires at least two consecutive months of price data to detect spikes.
 
-For the agent to work effectively, your sheet must contain the following columns. The agent is robust to missing data but performs best with complete information.
-
-| Column | Required? | Example | Description |
-| :--- | :--- | :--- | :--- |
-| **`Part Number`** | **Yes** | `ABC123` | Unique identifier for the part. |
-| **`Supplier`** | **Yes** | `Supplier A` | The single, current supplier for this part. |
-| **`Description`** | **Yes** | `EPDM Gasket 2mm` | Used for web searches. |
-| **`Commodity`** | **Yes** | `EPDM` | Used for cross-material comparisons. |
-| **`Current Price`** | No | `3.40` | The most recent price. |
-| **`price_mmmYYYY`** | No | `price_apr2025` | **Crucial for trend analysis.** Use this format for historical prices (e.g., `price_may2025`, `price_jun2025`). |
+#### Price Evolution Index
+-   `Priceevoindexjan2023`, `Priceevoindexfeb2023`, ...
+-   **Crucial for market comparison.** Represents the average market price for the part. The agent compares your `price` to this `Priceevoindex` for the same month.
 
 ## 🚀 Running the Application
 
-Ensure your `GOOGLE_SERVICE_ACCOUNT_JSON` environment variable is set, then start the server:
-
+Ensure the `GOOGLE_SERVICE_ACCOUNT_JSON` environment variable is set, then:
 ```bash
 uvicorn main:app --reload
 ```
-
-The API will be available at `http://localhost:8000/docs` for interactive documentation.
+Access the interactive documentation at `http://localhost:8000/docs`.
 
 ## 📋 API Endpoints
 
 ### `POST /api/procurement-analysis`
 
-Triggers a full, comprehensive analysis of the Google Sheet data. It takes no request body.
-
-**How to Call:**
-```bash
-curl -X POST "http://localhost:8000/api/procurement-analysis"
-```
+Triggers a full analysis of the Google Sheet. It requires no request body.
 
 **Example Response:**
 ```json
 {
-  "summary": "Analysis complete. Found 2 total opportunities...",
+  "summary": "Analysis complete. Found 3 opportunities...",
   "opportunities": [
     {
       "part_number": "ABC123",
       "current_supplier": "Supplier A",
-      "current_price_and_trend": "€3.40 (+12% since May)",
-      "type": "Insourcing",
-      "description": "Supplier 'Supplier B' provides a similar material ('epdm') via part 'DEF456' for €2.80, which is 18% cheaper. Consider requesting a quote from them for 'ABC123'."
+      "current_price_and_trend": "€3.40 (15% above market index)",
+      "type": "Renegotiation",
+      "description": "This part's price is significantly above the market index. Recommend renegotiating with 'Supplier A' for a price closer to the market average."
     },
     {
-      "part_number": "ABC123",
-      "current_supplier": "Supplier A",
-      "current_price_and_trend": "€3.40 (+12% since May)",
-      "type": "Outsourcing",
-      "description": "Found potential supplier: 'Supplier XYZ Inc. - Industrial Gaskets'. Website: http://xyz-gaskets.com. Recommendation: Benchmark for potential outsourcing."
+      "part_number": "DEF456",
+      "current_supplier": "Supplier B",
+      "current_price_and_trend": "€5.50 (+20% vs last month)",
+      "type": "Insourcing",
+      "description": "Supplier 'Supplier C' provides a similar material ('pa66 15%gf') via part 'GHI789' for €4.80, which is 13% cheaper. Consider requesting a quote from them for 'DEF456'."
     }
-  ],
-  "analysis_timestamp": "2025-06-21T10:00:00.000Z"
+  ]
 }
 ```
 
-### `GET /api/health`
-
-A simple health check endpoint to verify the service is running.
-
 ## 💡 Agent Logic Explained
 
-1.  **Price Trend Analysis**: The agent scans for columns matching the `price_mmmYYYY` pattern to build a price history for each part. It flags any part where the latest price is >10% higher than the previous month's price.
-2.  **Insourcing (Cross-Material Benchmarking)**: For each "price spike" part, the agent looks for *other* parts in your sheet with the same `Commodity`. If it finds a cheaper part from a different supplier, it generates a recommendation to request a quote, leveraging your existing supplier relationships.
-3.  **Outsourcing (Web Scraping)**: For all parts (prioritizing those with price spikes), the agent constructs a Google search query using the part's `Description` and `Commodity`. It then scrapes the first page of results to find potential new suppliers and their websites.
-
-## 🔒 Security & Privacy
-
--   **Credentials**: Your Google service account JSON is loaded securely from an environment variable and should **never** be hardcoded or committed to version control.
--   **Data Privacy**: Your procurement data from the Google Sheet is processed in-memory and is **never** shared with any third-party service.
--   **Web Scraping**: The web scraper uses a standard `User-Agent` and only accesses public search engine results.
+1.  **Price Analysis (Highest Priority)**: For the most recent month, the agent first checks if the part's price (`price...`) is more than 10% above the market index (`Priceevoindex...`). If so, it creates a high-priority **"Renegotiation"** opportunity.
+2.  **Price Spike Analysis**: If the part is not above the market index, the agent then checks if the price has spiked more than 10% compared to the previous month.
+3.  **Insourcing**: If a price spike is detected, the agent searches for other parts with the same `material` from different suppliers in your sheet to find cheaper internal alternatives, creating an **"Insourcing"** opportunity.
+4.  **Outsourcing**: For every part, the agent performs a web search using its `part name` and `material` to find new potential suppliers, creating an **"Outsourcing"** opportunity.
 
 ---
-
 *This project is licensed under the MIT License.* 

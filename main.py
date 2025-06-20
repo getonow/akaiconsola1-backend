@@ -10,12 +10,12 @@ from collections import defaultdict
 import re
 from datetime import datetime
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 
 app = FastAPI(
     title="AI-Powered Procurement Analysis API",
     description="Analyzes procurement data from Google Sheets to identify cost-saving opportunities through price trend analysis, cross-material benchmarking, and web-based supplier discovery.",
-    version="2.0.0",
+    version="2.1.0",
 )
 
 # --- CORS Middleware ---
@@ -50,8 +50,8 @@ except Exception as e:
 class ProcurementOpportunity(BaseModel):
     part_number: str
     current_supplier: str
-    current_price_and_trend: str = Field(..., description="e.g., '€3.40 (+12% since Apr)'")
-    type: str = Field(..., description="'Insourcing' or 'Outsourcing'")
+    current_price_and_trend: str = Field(..., description="e.g., '€3.40 (+12% vs last month)' or '€3.40 (15% above market index)'")
+    type: str = Field(..., description="'Renegotiation', 'Insourcing', or 'Outsourcing'")
     description: str = Field(..., description="Detailed explanation and next action.")
 
 class ProcurementAnalysis(BaseModel):
@@ -62,25 +62,23 @@ class ProcurementAnalysis(BaseModel):
 class ProcurementAnalyzer:
     def __init__(self, sheet_data: List[Dict[str, Any]]):
         self.data = self._clean_data(sheet_data)
-        self.parts_by_commodity = self._group_by_commodity()
+        self.parts_by_material = self._group_by_material()
 
     def _clean_data(self, sheet_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Clean and normalize sheet data."""
         clean_data = []
         for row in sheet_data:
-            # Ensure essential keys exist
-            if not row.get("Part Number") or not row.get("Supplier"):
-                continue
-            clean_data.append(row)
+            if row.get("partreferencenumber") and row.get("suppliername"):
+                clean_data.append(row)
         return clean_data
 
-    def _group_by_commodity(self) -> Dict[str, list]:
-        """Group parts by their commodity for cross-part analysis."""
+    def _group_by_material(self) -> Dict[str, list]:
+        """Group parts by their material for cross-part analysis."""
         grouped = defaultdict(list)
         for part in self.data:
-            commodity = str(part.get("Commodity", "")).strip().lower()
-            if commodity:
-                grouped[commodity].append(part)
+            material = str(part.get("material", "")).strip().lower()
+            if material:
+                grouped[material].append(part)
         return grouped
 
     def _parse_price(self, price_val: Any) -> Optional[float]:
@@ -96,171 +94,155 @@ class ProcurementAnalyzer:
         except (ValueError, TypeError):
             return None
 
-    def _find_price_columns(self) -> List[str]:
-        """Dynamically find historical price columns (e.g., 'pricemonthYYYY')."""
+    def _find_dynamic_columns(self, pattern: re.Pattern) -> List[str]:
+        """Dynamically find columns matching a given pattern."""
         if not self.data:
             return []
-        # Regex to find columns like "pricejan2024", "price_may_2025", etc.
-        price_col_pattern = re.compile(r'price_?[a-zA-Z]{3,}_?\d{4}', re.IGNORECASE)
-        return sorted([col for col in self.data[0].keys() if price_col_pattern.match(col)])
+        # Create a date-sortable key: (YYYY, MM)
+        def sort_key(col_name):
+            match = re.search(r'(?P<month>[a-zA-Z]+)(?P<year>\d{4})', col_name)
+            if not match: return (0, 0)
+            month_str = match.group('month').lower()
+            year = int(match.group('year'))
+            # Convert month name to number for sorting
+            try:
+                month_num = datetime.strptime(month_str, '%B').month
+            except ValueError:
+                month_num = 0 # Should not happen with valid month names
+            return (year, month_num)
 
-    def analyze_price_trends(self, part: Dict[str, Any], price_cols: List[str]) -> Optional[Dict[str, Any]]:
-        """Analyzes historical prices for a single part to find trends."""
+        return sorted([col for col in self.data[0].keys() if pattern.match(col)], key=sort_key)
+
+    def analyze_price_trends_and_index(self, part: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Analyzes historical prices for a single part to find trends and compare to market index."""
+        price_cols = self._find_dynamic_columns(re.compile(r'price\w+\d{4}', re.IGNORECASE))
+        index_cols = self._find_dynamic_columns(re.compile(r'Priceevoindex\w+\d{4}', re.IGNORECASE))
+        
         if len(price_cols) < 2:
             return None
 
-        prices = [(col, self._parse_price(part.get(col))) for col in price_cols]
-        valid_prices = [(col, p) for col, p in prices if p is not None]
+        # --- Month-over-Month Spike Analysis ---
+        latest_price_col = price_cols[-1]
+        prev_price_col = price_cols[-2]
+        latest_price = self._parse_price(part.get(latest_price_col))
+        prev_price = self._parse_price(part.get(prev_price_col))
 
-        if len(valid_prices) < 2:
-            return None
-
-        latest_col, latest_price = valid_prices[-1]
-        previous_col, previous_price = valid_prices[-2]
-
-        if latest_price > previous_price:
-            increase_percent = ((latest_price - previous_price) / previous_price) * 100
+        if latest_price and prev_price and latest_price > prev_price:
+            increase_percent = ((latest_price - prev_price) / prev_price) * 100
             if increase_percent > 10.0:
-                month_name = latest_col.split('_')[1].capitalize() if '_' in latest_col else latest_col.replace('price', '').capitalize()
-                return {
-                    "trend_str": f"€{latest_price:.2f} (+{increase_percent:.0f}% since {month_name})",
-                    "latest_price": latest_price,
-                    "is_spike": True
-                }
-        
-        # Default trend string if no spike
-        return {
-            "trend_str": f"€{latest_price:.2f} (Stable)",
-            "latest_price": latest_price,
-            "is_spike": False
-        }
+                trend_str = f"€{latest_price:.2f} (+{increase_percent:.0f}% vs last month)"
+                return {"trend_str": trend_str, "latest_price": latest_price, "is_spike": True, "is_above_index": False}
 
-    def find_insourcing_opportunities(self, flagged_part: Dict[str, Any], latest_price: float) -> Optional[str]:
-        """For a flagged part, find cheaper, similar parts from other suppliers."""
-        part_commodity = str(flagged_part.get("Commodity", "")).strip().lower()
-        if not part_commodity:
+        # --- Market Index Deviation Analysis ---
+        if index_cols and price_cols:
+            latest_index_col = index_cols[-1]
+            latest_market_price = self._parse_price(part.get(latest_index_col))
+            if latest_price and latest_market_price and latest_price > latest_market_price:
+                deviation = ((latest_price - latest_market_price) / latest_market_price) * 100
+                if deviation > 10.0:
+                    trend_str = f"€{latest_price:.2f} ({deviation:.0f}% above market index)"
+                    return {"trend_str": trend_str, "latest_price": latest_price, "is_spike": False, "is_above_index": True}
+
+        # --- Default/Stable Case ---
+        trend_str = f"€{latest_price:.2f} (Stable)" if latest_price else "Price N/A"
+        return {"trend_str": trend_str, "latest_price": latest_price, "is_spike": False, "is_above_index": False}
+
+    def find_insourcing_opportunities(self, part: Dict[str, Any], price: float) -> Optional[str]:
+        """For a part, find cheaper, similar parts from other suppliers."""
+        material = str(part.get("material", "")).strip().lower()
+        if not material:
             return None
 
-        comparison_candidates = self.parts_by_commodity.get(part_commodity, [])
-        best_alternative = None
-        min_alternative_price = float('inf')
+        candidates = self.parts_by_material.get(material, [])
+        best_alt = min(
+            (c for c in candidates if c['partreferencenumber'] != part['partreferencenumber'] and c['suppliername'] != part['suppliername']),
+            key=lambda c: self._parse_price(c.get(self._find_dynamic_columns(re.compile(r'price\w+\d{4}', re.IGNORECASE))[-1])) or float('inf'),
+            default=None
+        )
 
-        for candidate in comparison_candidates:
-            # Don't compare a part to itself or parts from the same supplier
-            if candidate["Part Number"] == flagged_part["Part Number"] or candidate["Supplier"] == flagged_part["Supplier"]:
-                continue
-            
-            candidate_price = self._parse_price(candidate.get("Current Price"))
-            if candidate_price and candidate_price < min_alternative_price:
-                min_alternative_price = candidate_price
-                best_alternative = candidate
-
-        if best_alternative and min_alternative_price < latest_price:
-            price_diff_percent = ((latest_price - min_alternative_price) / latest_price) * 100
-            return (
-                f"Supplier '{best_alternative['Supplier']}' provides a similar material ('{part_commodity}') "
-                f"via part '{best_alternative['Part Number']}' for €{min_alternative_price:.2f}, which is "
-                f"{price_diff_percent:.0f}% cheaper. Consider requesting a quote from them for '{flagged_part['Part Number']}'."
-            )
+        if best_alt:
+            alt_price = self._parse_price(best_alt.get(self._find_dynamic_columns(re.compile(r'price\w+\d{4}', re.IGNORECASE))[-1]))
+            if alt_price and alt_price < price:
+                savings = ((price - alt_price) / price) * 100
+                return (f"Supplier '{best_alt['suppliername']}' provides a similar material ('{material}') "
+                        f"via part '{best_alt['partreferencenumber']}' for €{alt_price:.2f}, which is {savings:.0f}% cheaper. "
+                        f"Consider requesting a quote from them for '{part['partreferencenumber']}'.")
         return None
 
     def find_outsourcing_opportunities(self, part: Dict[str, Any]) -> Optional[str]:
         """Perform a web search to find new potential suppliers."""
-        part_name = part.get("Description", part.get("Part Number", "")).strip()
-        commodity = part.get("Commodity", "").strip()
-        query = f'"{part_name}" "{commodity}" suppliers in Europe delivery to France'
-        
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-        }
+        query = f'"{part.get("part name", "")}" "{part.get("material", "")}" suppliers Europe'
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
         try:
             response = requests.get(f"https://www.google.com/search?q={query}", headers=headers, timeout=5)
             response.raise_for_status()
             soup = BeautifulSoup(response.text, 'html.parser')
+            result = soup.find('div', class_='g')
             
-            # Find search result containers
-            results = soup.find_all('div', class_='g')
-            if not results:
-                return None
-            
-            # Extract info from the first valid result
-            for res in results:
-                title_tag = res.find('h3')
-                link_tag = res.find('a')
-                snippet_tag = res.find('div', class_='VwiC3b')
-                
-                if title_tag and link_tag and snippet_tag:
-                    title = title_tag.get_text()
-                    link = link_tag['href']
-                    # Clean up the URL
-                    if link.startswith('/url?q='):
-                        link = link.split('/url?q=')[1].split('&sa=U')[0]
+            if result:
+                title_tag = result.find('h3')
+                link_tag = result.find('a')
 
-                    return (f"Found potential supplier: '{title}'. Website: {link}. "
-                            f"Recommendation: Benchmark for potential outsourcing.")
-            return None
+                if isinstance(title_tag, Tag) and isinstance(link_tag, Tag) and link_tag.has_attr('href'):
+                    link_href_attr = link_tag['href']
+                    # Ensure link_href is a string, as bs4 can return a list
+                    link_href = link_href_attr[0] if isinstance(link_href_attr, list) else link_href_attr
+                    
+                    link = link_href.split('/url?q=')[1].split('&sa=U')[0] if '/url?q=' in link_href else link_href
+                    return f"Found potential supplier: '{title_tag.get_text()}'. Website: {link}. Recommendation: Benchmark for potential outsourcing."
+
         except requests.RequestException as e:
             print(f"Web scraping failed for query '{query}': {e}")
-            return None
+        return None
 
     def run_analysis(self) -> ProcurementAnalysis:
         opportunities = []
-        price_cols = self._find_price_columns()
-        
-        flagged_parts_for_outsourcing = set()
+        processed_for_outsourcing = set()
 
-        # Main analysis loop
         for part in self.data:
-            trend_info = self.analyze_price_trends(part, price_cols)
-            if not trend_info:
-                # Use current price if no trend data
-                price = self._parse_price(part.get("Current Price"))
-                trend_info = {
-                    "trend_str": f"€{price:.2f}" if price else "Price N/A",
-                    "latest_price": price,
-                    "is_spike": False
-                }
+            trend_info = self.analyze_price_trends_and_index(part)
+            if not trend_info: continue
 
-            # If price spike, search for insourcing and outsourcing opportunities
-            if trend_info["is_spike"]:
-                flagged_parts_for_outsourcing.add(part["Part Number"])
-                insourcing_desc = self.find_insourcing_opportunities(part, trend_info["latest_price"])
+            latest_price = trend_info["latest_price"]
+            
+            # Opportunity 1: Price is above market index
+            if trend_info["is_above_index"]:
+                opportunities.append(ProcurementOpportunity(
+                    part_number=part["partreferencenumber"],
+                    current_supplier=part["suppliername"],
+                    current_price_and_trend=trend_info["trend_str"],
+                    type="Renegotiation",
+                    description=f"This part's price is significantly above the market index. Recommend renegotiating with '{part['suppliername']}' for a price closer to the market average."
+                ))
+
+            # Opportunity 2: Price spiked recently (In-house benchmarking)
+            if trend_info["is_spike"] and latest_price:
+                insourcing_desc = self.find_insourcing_opportunities(part, latest_price)
                 if insourcing_desc:
                     opportunities.append(ProcurementOpportunity(
-                        part_number=part["Part Number"],
-                        current_supplier=part["Supplier"],
+                        part_number=part["partreferencenumber"],
+                        current_supplier=part["suppliername"],
                         current_price_and_trend=trend_info["trend_str"],
                         type="Insourcing",
                         description=insourcing_desc
                     ))
 
-        # Run outsourcing analysis on all unique parts, prioritizing flagged ones
-        processed_for_outsourcing = set()
-        sorted_parts = sorted(self.data, key=lambda p: p["Part Number"] in flagged_parts_for_outsourcing, reverse=True)
-
-        for part in sorted_parts:
-            if part["Part Number"] in processed_for_outsourcing:
-                continue
-            
-            outsourcing_desc = self.find_outsourcing_opportunities(part)
-            if outsourcing_desc:
-                # Use current price for trend if no historical data
-                price = self._parse_price(part.get("Current Price"))
-                trend_str = trend_info.get("trend_str", f"€{price:.2f}" if price else "Price N/A")
-
-                opportunities.append(ProcurementOpportunity(
-                    part_number=part["Part Number"],
-                    current_supplier=part["Supplier"],
-                    current_price_and_trend=trend_str,
-                    type="Outsourcing",
-                    description=outsourcing_desc
-                ))
-            processed_for_outsourcing.add(part["Part Number"])
-
-        # Generate Summary
-        summary = f"Analysis complete. Found {len(opportunities)} total opportunities. "
-        summary += f"Identified {len([o for o in opportunities if o.type == 'Insourcing'])} parts with price spikes suitable for internal benchmarking. "
-        summary += f"Found {len([o for o in opportunities if o.type == 'Outsourcing'])} potential external suppliers."
+            # Opportunity 3: Find external suppliers (Outsourcing)
+            if part["partreferencenumber"] not in processed_for_outsourcing:
+                if outsourcing_desc := self.find_outsourcing_opportunities(part):
+                    opportunities.append(ProcurementOpportunity(
+                        part_number=part["partreferencenumber"],
+                        current_supplier=part["suppliername"],
+                        current_price_and_trend=trend_info["trend_str"],
+                        type="Outsourcing",
+                        description=outsourcing_desc
+                    ))
+                processed_for_outsourcing.add(part["partreferencenumber"])
+        
+        summary = (f"Analysis complete. Found {len(opportunities)} opportunities. "
+                   f"{len([o for o in opportunities if o.type == 'Renegotiation'])} parts are priced above market index. "
+                   f"{len([o for o in opportunities if o.type == 'Insourcing'])} parts have price spikes suitable for internal benchmarking. "
+                   f"{len([o for o in opportunities if o.type == 'Outsourcing'])} potential external suppliers found.")
 
         return ProcurementAnalysis(summary=summary, opportunities=opportunities)
 
@@ -279,8 +261,7 @@ def analyze_procurement():
         if not records:
             raise HTTPException(status_code=404, detail="No data found in the Google Sheet.")
             
-        analyzer = ProcurementAnalyzer(records)
-        analysis_result = analyzer.run_analysis()
+        analysis_result = ProcurementAnalyzer(records).run_analysis()
         return analysis_result
     
     except Exception as e:
