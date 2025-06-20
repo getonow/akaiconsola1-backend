@@ -30,8 +30,8 @@ The agent is designed to work with the following exact column names.
 -   `suppliercontactname`: Main contact person.
 -   `suppliercontactemail`: Contact's email.
 -   `suppliermanufacturinglocation`: City and country of manufacture.
--   `partreferencenumber`: **(Required)** Unique ID for the part.
--   `part name`: **(Required)** Description of the part, used for web searches.
+-   `Part Number`: **(Required)** Unique ID for the part.
+-   `partname`: **(Required)** Description of the part, used for web searches.
 -   `material`: **(Required)** The material type (e.g., `EPDM`), used for cross-material comparisons.
 -   `currency`: The currency for pricing (e.g., `EUR`).
 

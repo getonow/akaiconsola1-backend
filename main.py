@@ -68,7 +68,7 @@ class ProcurementAnalyzer:
         """Clean and normalize sheet data."""
         clean_data = []
         for row in sheet_data:
-            if row.get("partreferencenumber") and row.get("suppliername"):
+            if row.get("Part Number") and row.get("suppliername"):
                 clean_data.append(row)
         return clean_data
 
@@ -155,7 +155,7 @@ class ProcurementAnalyzer:
 
         candidates = self.parts_by_material.get(material, [])
         best_alt = min(
-            (c for c in candidates if c['partreferencenumber'] != part['partreferencenumber'] and c['suppliername'] != part['suppliername']),
+            (c for c in candidates if c['Part Number'] != part['Part Number'] and c['suppliername'] != part['suppliername']),
             key=lambda c: self._parse_price(c.get(self._find_dynamic_columns(re.compile(r'price\w+\d{4}', re.IGNORECASE))[-1])) or float('inf'),
             default=None
         )
@@ -165,13 +165,13 @@ class ProcurementAnalyzer:
             if alt_price and alt_price < price:
                 savings = ((price - alt_price) / price) * 100
                 return (f"Supplier '{best_alt['suppliername']}' provides a similar material ('{material}') "
-                        f"via part '{best_alt['partreferencenumber']}' for €{alt_price:.2f}, which is {savings:.0f}% cheaper. "
-                        f"Consider requesting a quote from them for '{part['partreferencenumber']}'.")
+                        f"via part '{best_alt['Part Number']}' for €{alt_price:.2f}, which is {savings:.0f}% cheaper. "
+                        f"Consider requesting a quote from them for '{part['Part Number']}'.")
         return None
 
     def find_outsourcing_opportunities(self, part: Dict[str, Any]) -> Optional[str]:
         """Perform a web search to find new potential suppliers."""
-        query = f'"{part.get("part name", "")}" "{part.get("material", "")}" suppliers Europe'
+        query = f'"{part.get("partname", "")}" "{part.get("material", "")}" suppliers Europe'
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
         try:
             response = requests.get(f"https://www.google.com/search?q={query}", headers=headers, timeout=5)
@@ -179,13 +179,12 @@ class ProcurementAnalyzer:
             soup = BeautifulSoup(response.text, 'html.parser')
             result = soup.find('div', class_='g')
             
-            if result:
+            if isinstance(result, Tag):
                 title_tag = result.find('h3')
                 link_tag = result.find('a')
 
                 if isinstance(title_tag, Tag) and isinstance(link_tag, Tag) and link_tag.has_attr('href'):
                     link_href_attr = link_tag['href']
-                    # Ensure link_href is a string, as bs4 can return a list
                     link_href = link_href_attr[0] if isinstance(link_href_attr, list) else link_href_attr
                     
                     link = link_href.split('/url?q=')[1].split('&sa=U')[0] if '/url?q=' in link_href else link_href
@@ -208,7 +207,7 @@ class ProcurementAnalyzer:
             # Opportunity 1: Price is above market index
             if trend_info["is_above_index"]:
                 opportunities.append(ProcurementOpportunity(
-                    part_number=part["partreferencenumber"],
+                    part_number=part["Part Number"],
                     current_supplier=part["suppliername"],
                     current_price_and_trend=trend_info["trend_str"],
                     type="Renegotiation",
@@ -220,7 +219,7 @@ class ProcurementAnalyzer:
                 insourcing_desc = self.find_insourcing_opportunities(part, latest_price)
                 if insourcing_desc:
                     opportunities.append(ProcurementOpportunity(
-                        part_number=part["partreferencenumber"],
+                        part_number=part["Part Number"],
                         current_supplier=part["suppliername"],
                         current_price_and_trend=trend_info["trend_str"],
                         type="Insourcing",
@@ -228,16 +227,16 @@ class ProcurementAnalyzer:
                     ))
 
             # Opportunity 3: Find external suppliers (Outsourcing)
-            if part["partreferencenumber"] not in processed_for_outsourcing:
+            if part["Part Number"] not in processed_for_outsourcing:
                 if outsourcing_desc := self.find_outsourcing_opportunities(part):
                     opportunities.append(ProcurementOpportunity(
-                        part_number=part["partreferencenumber"],
+                        part_number=part["Part Number"],
                         current_supplier=part["suppliername"],
                         current_price_and_trend=trend_info["trend_str"],
                         type="Outsourcing",
                         description=outsourcing_desc
                     ))
-                processed_for_outsourcing.add(part["partreferencenumber"])
+                processed_for_outsourcing.add(part["Part Number"])
         
         summary = (f"Analysis complete. Found {len(opportunities)} opportunities. "
                    f"{len([o for o in opportunities if o.type == 'Renegotiation'])} parts are priced above market index. "
