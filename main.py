@@ -23,7 +23,7 @@ app = FastAPI(
 # --- CORS Middleware ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://getonow.github.io", "http://localhost:5173"],  # Allow your deployed frontend and local dev
+    allow_origins=["https://getonow.github.io", "http://localhost:5173", "https://akaiconsola1.vercel.app"],  # Allow your deployed frontends and local dev
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
