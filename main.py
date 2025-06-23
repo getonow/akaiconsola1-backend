@@ -13,6 +13,8 @@ from datetime import datetime
 import time
 import requests
 from bs4 import BeautifulSoup, Tag
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 app = FastAPI(
     title="AI-Powered Procurement Analysis API",
@@ -307,8 +309,22 @@ def analyze_procurement(
         records = sheet.get_all_records()
         if not records:
             raise HTTPException(status_code=404, detail="No data found in the Google Sheet.")
-            
+        
         analysis_result = ProcurementAnalyzer(records).run_analysis()
+        # Write to Google Doc after analysis
+        try:
+            if hasattr(analysis_result, 'dict'):
+                analysis_dict = analysis_result.dict()
+            elif isinstance(analysis_result, dict):
+                analysis_dict = analysis_result
+            else:
+                analysis_dict = dict(analysis_result)
+            write_analysis_to_gdoc(
+                document_id="1WToYMmFn2vryeMmphkAxq5cNu-bY0cN7owVwddtRUeU",
+                analysis=analysis_dict
+            )
+        except Exception as doc_err:
+            print(f"WARNING: Could not write analysis to Google Doc: {doc_err}")
         return analysis_result
     
     except Exception as e:
@@ -318,6 +334,40 @@ def analyze_procurement(
 @app.get("/api/health", tags=["Monitoring"])
 def health_check():
     return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+
+# Utility function to write analysis result to a Google Doc
+def write_analysis_to_gdoc(document_id: str, analysis: dict):
+    """
+    Writes the procurement analysis result to the specified Google Doc.
+    Overwrites the document content with the new analysis.
+    """
+    try:
+        # Use the same credentials as for Sheets, but with Docs scope
+        docs_creds = Credentials.from_service_account_info(
+            json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]),
+            scopes=[
+                'https://www.googleapis.com/auth/documents',
+                'https://www.googleapis.com/auth/drive'
+            ]
+        )
+        service = build('docs', 'v1', credentials=docs_creds)
+
+        # Format the analysis as a string (pretty JSON)
+        import json as _json
+        analysis_str = _json.dumps(analysis, indent=2, ensure_ascii=False)
+
+        # Clear the document (replace all content)
+        requests_body = [
+            {"deleteContentRange": {"range": {"startIndex": 1, "endIndex": 1_000_000}}},
+            {"insertText": {"location": {"index": 1}, "text": analysis_str}}
+        ]
+        service.documents().batchUpdate(documentId=document_id, body={"requests": requests_body}).execute()
+    except HttpError as error:
+        print(f"An error occurred while writing to Google Doc: {error}")
+        raise
+    except Exception as e:
+        print(f"Unexpected error writing to Google Doc: {e}")
+        raise
 
 # To run locally: uvicorn main:app --reload
 # Ensure GOOGLE_SERVICE_ACCOUNT_JSON is set as an environment variable.
